@@ -1,0 +1,4 @@
+mappings_file: ./rest/resources/mappings.yml
+server_port: 8080
+
+

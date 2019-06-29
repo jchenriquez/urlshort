@@ -1,0 +1,5 @@
+urls:
+  - short: fb
+    long: http://facebook.com
+  - short: ghub
+    long: http://github.com
