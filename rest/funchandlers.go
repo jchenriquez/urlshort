@@ -1,65 +1,157 @@
 package rest
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/boltdb/bolt"
 	"github.com/gorilla/mux"
-	"gopkg.in/yaml.v2"
 	"net/http"
 )
 
 type URLShort struct {
-	Short string `yaml:"short,omitempty"`
-	Long string `yaml:"long,omitempty"`
+	Short string `json:"short,omitempty"`
+	Long  string `json:"long,omitempty"`
 }
 
 type Urls struct {
 	Urls []URLShort `yaml:"urls"`
 }
 
-func buildMap (url Urls) map[string] string {
-	mp := make(map[string]string)
-
-	for _, url := range url.Urls {
-		mp[url.Short] = url.Long
-	}
-
-	return mp
-}
-
-func MapHandler(mp map[string]string, fallback http.Handler) http.HandlerFunc {
-	return func (w http.ResponseWriter, r *http.Request) {
+func MapHandler(db *bolt.DB, fallback http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var urlLong []byte
 
 		attrs := mux.Vars(r)
 
-		url, ok := mp[attrs["name"]]
+		err := db.View(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket([]byte("url_maps"))
 
-		if ok {
-			http.Redirect(w, r, url, http.StatusFound)
-			return
+			urlLong = bucket.Get([]byte(attrs["name"]))
+			fmt.Println(string(urlLong))
+			if urlLong != nil {
+				http.Redirect(w, r, fmt.Sprintf("http://%s", string(urlLong)), http.StatusMovedPermanently)
+			} else {
+				fallback.ServeHTTP(w, r)
+			}
+
+			return nil
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 
-		fallback.ServeHTTP(w, r)
 	}
 }
 
-func YamlHandler(yBytes []byte, fallback http.Handler) (http.HandlerFunc, error) {
-	var urls Urls
+func urlWriteHandler(db *bolt.DB, mapper URLShort) error {
 
-	err := yaml.Unmarshal(yBytes, &urls)
+	return db.Update(func(tx *bolt.Tx) error {
+		bucket, _ := tx.CreateBucketIfNotExists([]byte("url_maps"))
 
-	if err != nil {
-		return nil, err
-	}
+		err := bucket.Put([]byte(mapper.Short), []byte(mapper.Long))
 
-	mp := buildMap(urls)
+		if err != nil {
+			return err
+		}
 
-	return MapHandler(mp, fallback), nil
+		return nil
+
+	})
 
 }
 
-func MakeRedirectingHandler() http.HandlerFunc {
+func urlReadAllHandler(db *bolt.DB) ([]URLShort, error) {
+	result := make([]URLShort, 0, 0)
+	err := db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("url_maps"))
+
+		if bucket == nil {
+			return nil
+		}
+
+		cursor := bucket.Cursor()
+
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			result = append(result, URLShort{
+				Long:  string(v),
+				Short: string(k),
+			})
+		}
+
+		return nil
+
+	})
+
+	return result, err
+}
+
+func urlDeleteHandler(db *bolt.DB, urlDef URLShort) error {
+
+	return db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("url_maps"))
+		return bucket.Delete([]byte(urlDef.Short))
+	})
+
+}
+
+func makeAdminHandler(db *bolt.DB) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		fmt.Printf("%v\n", *request)
-		http.Redirect(writer, request, request.URL.Path, http.StatusPermanentRedirect)
+
+		var payload []URLShort
+		var err error
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.Method {
+		case "GET":
+			payload, err = urlReadAllHandler(db)
+
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+		case "POST":
+			var urlPayload URLShort
+			err := json.NewDecoder(request.Body).Decode(&urlPayload)
+
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			err = urlWriteHandler(db, urlPayload)
+
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			} else {
+				payload, err = urlReadAllHandler(db)
+				writer.WriteHeader(http.StatusOK)
+			}
+
+		case "DELETE":
+
+			query := request.URL.Query()
+			var urlPayload URLShort
+			urlPayload.Short = query.Get("short")
+			urlPayload.Long = query.Get("Long")
+
+			err = urlDeleteHandler(db, urlPayload)
+
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			} else {
+				payload, err = urlReadAllHandler(db)
+				writer.WriteHeader(http.StatusOK)
+			}
+		}
+
+		err = json.NewEncoder(writer).Encode(payload)
+
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+		}
+
 	}
+
 }
