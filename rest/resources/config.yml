@@ -1,4 +1,2 @@
-mappings_file: ./rest/resources/mappings.yml
-server_port: 8080
-
+db_file_path: "my.db"
 

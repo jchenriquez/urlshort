@@ -1,44 +1,57 @@
 package rest
 
 import (
+	"errors"
 	"fmt"
 	"github.com/alemjc/gophercises/urlshort/rest/models"
+	"github.com/boltdb/bolt"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"net/http"
+	"os"
 )
 
 type config struct {
-	Mappings string `yaml:"mappings_file,omitempty"`
-	Port string `yaml:"server_port,omitempty"`
+	DBPath string `yaml:"db_file_path"`
 }
 
-func Start(confFilePath string) error {
-	var conf config
-
-	bytes,err := ioutil.ReadFile(confFilePath)
-	if err != nil{
+func Start(configFilePath string) error {
+	var cnf config
+	bytes, err := ioutil.ReadFile(configFilePath)
+	if err != nil {
 		return err
 	}
+	err = yaml.Unmarshal(bytes, &cnf)
 
-	err = yaml.Unmarshal(bytes, &conf)
 	if err != nil {
 		return err
 	}
 
-	bytes, err = ioutil.ReadFile(conf.Mappings)
+	db, err := bolt.Open(cnf.DBPath, 0666, nil)
+
+	if err != nil {
+		return err
+	}
+
+	defer db.Close()
 
 	router := mux.NewRouter()
-
-	yamlHandler, err := YamlHandler(bytes, models.NotFoundHandler("Not Found"))
+	router.Host("http://localhost")
+	mapHandler := MapHandler(db, models.NotFoundHandler("Not Found"))
+	dir, err := os.Getwd()
 	if err != nil {
-		return err
+		return errors.New("could not locate web directory")
 	}
+	fs := http.FileServer(http.Dir(fmt.Sprintf("%s/%s", dir, "web/build")))
+	router.PathPrefix("/static/").Handler(fs)
+	router.Handle("/admin", http.StripPrefix("/admin", fs))
+	router.HandleFunc("/admin/urls", makeAdminHandler(db))
+	router.HandleFunc("/{name:[a-zA-z]+}", mapHandler)
+	allowedOptions := handlers.AllowedMethods([]string{"GET", "POST", "DELETE", "OPTIONS"})
+	allowedHeaders := handlers.AllowedHeaders([]string{"Content-Type"})
+	allowedOrigins := handlers.AllowedOrigins([]string{"*"})
 
-	router.HandleFunc("/{name:[a-zA-z]+}", yamlHandler)
-	allowedOptions := handlers.AllowedMethods([]string{"GET"})
-
-	return http.ListenAndServe(fmt.Sprintf(":%s", conf.Port), handlers.CORS(allowedOptions)(router))
+	return http.ListenAndServe(fmt.Sprintf(":%s", os.Getenv("PORT")), handlers.CORS(allowedOptions, allowedHeaders, allowedOrigins)(router))
 }
